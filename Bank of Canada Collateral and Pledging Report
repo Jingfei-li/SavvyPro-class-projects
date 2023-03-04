@@ -1,0 +1,148 @@
+-- create 3 tables that has information which includes
+-- Collateral transactions as of Jul 2020. (Col_Trans)
+-- Security instrument details. (Sec)
+-- Counterparty details. (Customer)
+
+drop table if exists col_trans;
+CREATE TABLE Col_Trans (
+	Process_Date		TEXT,
+	Trade_ID		TEXT,
+	Transaction_Date	TEXT,
+	Currency		TEXT,
+	Customer_ID		TEXT,
+	Encum_Status		NUMERIC,
+	Product_Type		TEXT,
+	PV			DECIMAL(12,2),
+	PV_CDE			DECIMAL(12,2),
+	Encum_Mat_Date		TEXT,
+	Margin_Type		TEXT,
+	Security_ID		TEXT,
+	Post_Direction		TEXT,
+	CSA_ID			TEXT,
+	Quantity		NUMERIC,
+	primary key (Trade_ID)
+);
+
+
+drop table if exists Customer;
+CREATE TABLE Customer (
+	Customer_ID	TEXT,
+	Customer_Name	TEXT,
+	Industry	TEXT,
+	Jurisdiction	TEXT,
+	Credit_Rating	TEXT,
+	primary key (Customer_ID)
+);
+
+
+drop table if exists Sec;
+CREATE TABLE Sec (
+	Security_ID	TEXT,
+	Security_ID_2	TEXT,
+	Issuer	TEXT,
+	Issuer_Credit_Rating	TEXT,
+	Industry	TEXT,
+	Currency	TEXT,
+	Security_Type	TEXT,
+	Maturity_date	TEXT,
+	Issue_Date	TEXT,
+	Coupon	TEXT,
+	Price	FLOAT,
+	Factor	TEXT,
+	MTM_Date	TEXT,
+	Fixed_Flag	TEXT,
+	primary key (Security_ID)
+);
+
+-- create new table named customer2 with an additional column that classifies counterparty type
+drop table if exists Customer2;
+create table Customer2 as
+select * ,
+case 
+    when Jurisdiction = 'Canada' and industry = 'Financial' then 'Domestic Banks'
+    when Jurisdiction = 'Canada' and industry <> 'Financial' then 'Other Domestic'
+    else 'Foreign counterparties'
+end as counterparty_type
+from Customer
+;
+    
+-- create new table named Sec2 which classifies 3 levels asset
+drop table if exists Sec2;
+create table Sec2 as
+select *,
+case
+    when industry = 'Sovereign' and security_type = 'Bond' then 'Level_1_Asset'
+    when issuer_credit_rating like 'A%' and issuer_credit_rating <> 'A-' and industry not in ('Sovereign', 'Financial', 'Insurance') then 'Level_2_Asset'
+    else 'Level_3_Asset'
+end as asset_class
+from sec
+;
+
+-- create a new table that uses left outer joins Customer2 and COL_TRANS on customer_id when product type is security
+drop table if exists Cust_join;
+create table Cust_join as
+select
+      a.*,
+      b.counterparty_type
+from Col_trans a
+left join Customer2 b
+on a.customer_id = b.customer_id
+where a.product_type = 'Security'
+;
+
+-- left join cust_join and  sec2 twice on security id and security id2 , use coalesce to combine the results
+drop table if exists sec_join;
+create table sec_join as 
+select
+      a.*,
+      coalesce(b.asset_class, c.asset_class) as asset_class
+from cust_join a
+left join sec2 b on a.security_id = b.security_id
+left join sec2 c on a.security_id = c.security_id_2
+;
+
+-- group by counterparty_type, direction, margin_type
+create table output as
+select
+      counterparty_type,
+      case 
+          when post_direction = 'Deliv to Bank' then 'Collateral Received'
+          else 'Collateral Pledged'
+      end as direction,
+      margin_type,
+      sum(case when asset_class = 'Level_1_Asset' then pv_cde else 0 end) as Level_1_Asset,
+      sum(case when asset_class = 'Level_2_Asset' then pv_cde else 0 end) as Level_2_Asset,
+      sum(case when asset_class = 'Level_3_Asset' then pv_cde else 0 end) as Level_3_Asset
+from sec_join
+group by  counterparty_type, direction, margin_type
+order by  counterparty_type, direction, margin_type
+;
+
+-- cross join and left join to create a table report
+
+create table struct as
+select
+     a.counterparty_type,
+     b.direction,
+     c.margin_type
+from (select distinct counterparty_type from output) a
+cross join (select distinct direction from output) b
+cross join (select distinct margin_type from output) c
+order by a.counterparty_type, b.direction, c.margin_type
+;
+
+
+create table col_trans_report as
+select 
+      a.counterparty_type as 'Counterparty Type',
+      a.direction,
+      a.margin_type as 'Collateral Type',
+      coalesce(b.Level_1_Asset, 0) as Level_1_Asset,
+      coalesce(b.level_2_Asset, 0) as Level_2_Asset,
+      coalesce(b.level_3_Asset, 0) as Level_3_Asset
+from struct a
+left join output b
+on a.counterparty_type    = b.counterparty_type
+and a.direction   = b.direction
+and a.margin_type = b.margin_type
+;
